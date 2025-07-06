@@ -2,39 +2,49 @@ const Fastify = require("fastify");
 const WebSocket = require("ws");
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
+const fastifyWebsocket = require('@fastify/websocket');
 
+// Cấu hình cố định
+const TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjB9.p56b5g73I9wyoVu4db679bOvVeFJWVjGDg_ulBXyav8";
+const API_KEY = "tinh592007pq";
+const PORT = 4000;
+
+// Khởi tạo Fastify
 const fastify = Fastify({ logger: true });
-const PORT = process.env.PORT || 4000;
 fastify.register(require('@fastify/cors'), { origin: true });
+fastify.register(fastifyWebsocket);
 
-// Cấu hình API Key
-const API_KEY = "tinh592007pq"; // Thay đổi key này nếu cần
-
-// Khởi tạo cơ sở dữ liệu
+// Kết nối database
 const dbPath = path.resolve(__dirname, 'sun.sql');
 const db = new sqlite3.Database(dbPath);
 
-// Kết nối WebSocket tới Sunwin
-let ws = null;
-const TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjB9.p56b5g73I9wyoVu4db679bOvVeFJWVjGDg_ulBXyav8";
+// Route chính
+fastify.get("/", async (request, reply) => {
+  return {
+    status: "Sunwin API đang hoạt động",
+    endpoints: [
+      "/api/sunwin?key=API_KEY",
+      "/api/history?key=API_KEY&limit=10",
+      "/api/sunwin/taixiu/ws (WebSocket)"
+    ],
+    note: "Thay API_KEY bằng key thực tế"
+  };
+});
 
+// Xử lý favicon
+fastify.get("/favicon.ico", async (request, reply) => {
+  reply.code(204).send();
+});
+
+// Kết nối WebSocket Sunwin
+let ws = null;
 function connectWebSocket() {
   ws = new WebSocket(`wss://websocket.azhkthg1.net/websocket?token=${TOKEN}`);
 
   ws.on("open", () => {
     console.log("Đã kết nối WebSocket Sunwin");
-    
-    const authPayload = [
-      1, "MiniGame", "SC_xigtupou", "conga999",
-      {
-        info: JSON.stringify({
-          ipAddress: "171.246.10.199",
-          userId: "7c54ec3f-ee1a-428c-a56e-1bc14fd27e57",
-          username: "SC_xigtupou"
-        }),
-        signature: "0EC9E9B2311CD352561D9556F88F6AB4167502EAC5F9767D07D43E521FE1BA05..."
-      }
-    ];
+    const authPayload = [/* payload xác thực */];
     ws.send(JSON.stringify(authPayload));
   });
 
@@ -42,70 +52,59 @@ function connectWebSocket() {
     try {
       const json = JSON.parse(data);
       if (Array.isArray(json) && json[1]?.htr) {
-        for (const newItem of json[1].htr) {
-          if (newItem.d1 && newItem.d2 && newItem.d3) {
-            const total = newItem.d1 + newItem.d2 + newItem.d3;
-            const result = total >= 11 ? "Tài" : "Xỉu";
-            
+        json[1].htr.forEach(item => {
+          if (item.d1 && item.d2 && item.d3) {
+            const total = item.d1 + item.d2 + item.d3;
             db.run(
-              `INSERT OR IGNORE INTO sessions (sid, d1, d2, d3, total, result, timestamp) 
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
-              [newItem.sid, newItem.d1, newItem.d2, newItem.d3, total, result, Date.now()]
+              `INSERT OR IGNORE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              [item.sid, item.d1, item.d2, item.d3, total, total >= 11 ? "Tài" : "Xỉu", Date.now()]
             );
           }
-        }
+        });
       }
     } catch (e) {
-      console.error("Lỗi xử lý dữ liệu WebSocket:", e);
+      console.error("Lỗi xử lý WebSocket:", e);
     }
   });
 
   ws.on("close", () => {
-    console.log("Mất kết nối WebSocket, đang thử kết nối lại...");
+    console.log("Mất kết nối, đang kết nối lại...");
     setTimeout(connectWebSocket, 5000);
-  });
-
-  ws.on("error", (err) => {
-    console.error("Lỗi WebSocket:", err);
   });
 }
 
-// API endpoints đơn giản
-fastify.get("/api/latest", async (request, reply) => {
-  const key = request.query.key;
-  if (key !== API_KEY) {
+// API endpoints
+fastify.get("/api/sunwin", async (request, reply) => {
+  if (request.query.key !== API_KEY) {
     return reply.code(403).send({ error: "Invalid API key" });
   }
 
-  return new Promise((resolve, reject) => {
-    db.get(
-      "SELECT sid, d1, d2, d3, total, result, timestamp FROM sessions ORDER BY sid DESC LIMIT 1",
-      (err, row) => {
-        if (err) return reject(err);
-        resolve(row || { message: "Chưa có dữ liệu" });
-      }
-    );
+  const row = await new Promise((resolve) => {
+    db.get("SELECT * FROM sessions ORDER BY sid DESC LIMIT 1", (err, row) => {
+      resolve(row || { error: "No data" });
+    });
   });
+  return row;
 });
 
 fastify.get("/api/history", async (request, reply) => {
-  const key = request.query.key;
-  if (key !== API_KEY) {
+  if (request.query.key !== API_KEY) {
     return reply.code(403).send({ error: "Invalid API key" });
   }
 
-  const limit = parseInt(request.query.limit) || 50;
-  
-  return new Promise((resolve, reject) => {
-    db.all(
-      `SELECT sid, d1, d2, d3, total, result, timestamp 
-       FROM sessions ORDER BY sid DESC LIMIT ?`,
-      [limit],
-      (err, rows) => {
-        if (err) return reject(err);
-        resolve(rows);
-      }
-    );
+  const limit = Math.min(parseInt(request.query.limit) || 50, 100);
+  const rows = await new Promise((resolve) => {
+    db.all(`SELECT * FROM sessions ORDER BY sid DESC LIMIT ?`, [limit], (err, rows) => {
+      resolve(rows || []);
+    });
+  });
+  return rows;
+});
+
+// WebSocket endpoint
+fastify.get('/api/sunwin/taixiu/ws', { websocket: true }, (connection) => {
+  connection.socket.on('message', message => {
+    console.log('Received message:', message.toString());
   });
 });
 
@@ -113,7 +112,7 @@ fastify.get("/api/history", async (request, reply) => {
 const start = async () => {
   try {
     // Tạo bảng nếu chưa tồn tại
-    await new Promise((resolve, reject) => {
+    await new Promise((resolve) => {
       db.run(`
         CREATE TABLE IF NOT EXISTS sessions (
           sid INTEGER PRIMARY KEY,
@@ -124,13 +123,12 @@ const start = async () => {
           result TEXT NOT NULL,
           timestamp INTEGER NOT NULL
         )
-      `, (err) => err ? reject(err) : resolve());
+      `, resolve);
     });
 
     connectWebSocket();
-    
     await fastify.listen({ port: PORT, host: "0.0.0.0" });
-    console.log(`Server đang chạy tại http://localhost:${PORT}`);
+    console.log(`Server đang chạy tại: http://localhost:${PORT}`);
   } catch (err) {
     console.error("Lỗi khởi động server:", err);
     process.exit(1);
